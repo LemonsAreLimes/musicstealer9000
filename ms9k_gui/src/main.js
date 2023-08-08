@@ -18,26 +18,54 @@ listen("nameUpdate", (e)=>{
   `
 })
 
-let download = async () => {
-  console.log("Downloading")
+let download_button = async () => {
+  console.log("download func")
+
+  let button = document.getElementById("download_button")
+  console.log(button.dataset.status)
+
+  //if we are not already downloading, then download
+  if( button.dataset.status == "standby" ){ 
+    console.log("standby")
+    
+    //make sure the link is correct
+    let token = document.querySelector("body").dataset.token
+    let url = document.querySelector("#playlist_link").value
+    if(url=="" || url==" "){ return false; }
+
+    let is_valid = await invoke("check_link", {url: url, token: token});
+    console.log(is_valid)
+    if (!is_valid) { 
+      console.log("invalid link!")
+      return false; 
+    }
+
+    console.log("downloading: "+url)
+
+    //switch download button to stop button
+    button.dataset.status = "downloading"
+    button.innerText = "Stop"
+
+    let x = await invoke("start_download", {url: url, token: token});
+    console.log(x)
+    console.log("d")
+  }
   
-  //make sure the link is correct
-  let token = document.querySelector("body").dataset.token
-  let url = document.querySelector("#playlist_link").value
-  if(url=="" || url==" "){ return false; }
+  //if we are downloading and stop button is clicked
+  else if (button.dataset.status == "downloading"){
+    console.log("stopping download")
+    button.dataset.status = "standby"
+    button.innerText = "Download!"
+    await invoke("stop_download")
+  }
 
-  let is_valid = await invoke("check_link", {url: url, token: token});
-  if (!is_valid) { return false; }
-
-  //if it is then start downloading
- let x = await invoke("start_download", {url: url, token: token});
- console.log(x)
 }
 
 let add_playlist = async () => {
+  let token = document.querySelector("body").dataset.token
   let playlist_id = document.querySelector("#playlist_link").value
   if ( playlist_id == "" || playlist_id == " " ) { return }
-  await invoke("set_playlist", {playlistId: playlist_id});
+  await invoke("set_playlist", {playlistId: playlist_id, token: token});
 }
 async function open_main_page(){
   let threadcount = await invoke("get_thread_count");
@@ -47,7 +75,7 @@ async function open_main_page(){
   <input id="playlist_link" placeholder="playlist link" >
   <div class="button_container">
     <button id="add_button""><i class="fa-solid fa-plus"></i></button>
-    <button id="download_button"">Download!</button>
+    <button id="download_button"" data-status="standby" >Download!</button>
   </div>
   <div id="playlist_items">
   </div>
@@ -65,8 +93,7 @@ async function open_main_page(){
     </div>
   </div>`
   // <button id="folderSelect" onclick="openFileInput()">Chose a directory</button>
-  document.querySelector("#download_button").addEventListener("click", download)
-  // document.querySelector("#folderSelect").addEventListener("click", set_download_dir)
+  document.querySelector("#download_button").addEventListener("click", download_button)
   document.querySelector("#threadDownButton").addEventListener("click", decreceThreadCount)
   document.querySelector("#threadUpButton").addEventListener("click", increceThreadCount)
   document.querySelector("#add_button").addEventListener("click", add_playlist)
@@ -82,7 +109,6 @@ async function open_main_page(){
       </div>
       <div class="playlist_options" style="opacity: 0;">
         <div class="playlist_button"><i class="fa-solid fa-trash" data-type="trash" data-id="${playlist.id}"></i></div>
-        <div class="playlist_button"><i class="fa-solid fa-gear"  data-type="settings" data-id="${playlist.id}"></i></div>
       </div>
     </div>
     `
@@ -157,14 +183,6 @@ async function open_credential_page(){
   //set the event handler for the button
   document.querySelector("#creds_button").addEventListener("click", test_client_credentials)
   return
-}
-
-let set_download_dir = async ()=>{
-  const selectedDirectory = await window.__TAURI__.dialog.open({ directory: true });
-  await invoke("set_download_dir", {dir: selectedDirectory})
-  console.log(selectedDirectory)
-  // document.getElementById('folder').click();
-  // document.getElementById('folder').addEventListener('change', set_download_dir)
 }
 
 let decreceThreadCount = async ()=>{
