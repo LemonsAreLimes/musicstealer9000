@@ -1,4 +1,3 @@
-use std::os::windows::process::CommandExt;
 use std::{
     process::Command,
     path::Path,
@@ -11,11 +10,13 @@ use reqwest;
 use reqwest::header::{ ACCEPT, AUTHORIZATION, CONTENT_TYPE };
 use json::JsonValue;
 use rand::Rng;
-use tokio;
+// use tokio::{task::JoinHandle};
 use image;
 use id3::{ Tag, TagLike, Version };
 use id3_image::embed_image;
 use dirs;
+use tauri::State;
+// use tokio::sync::Mutex;
 
 #[derive(Debug, Deserialize)]
 struct AcsessTokenResponse {
@@ -41,16 +42,16 @@ struct Song {
     genre: String,
 }
 
-struct Downloader {
-    window: tauri::Window,
+#[derive(Debug)]
+pub struct Downloader {
+    window: Option<tauri::Window>,
     download_dir: String,
     token: String,
     playlist_id: String,
-    playlist_length: Option<usize>,
     data: Vec<Song>,
     thread_count: u32,
+    threads: Option<Vec<tokio::task::JoinHandle<()>>>,
 } 
-unsafe impl Send for Downloader {}
 
 async fn edit_id3(track: &Song, track_path: &str, image_path: &str){
 
@@ -83,15 +84,23 @@ async fn edit_id3(track: &Song, track_path: &str, image_path: &str){
 
 
 }
-async fn download(song: &Song, dir: &str) -> bool{
+async fn download_audio(song: &Song, dir: &str) -> bool{
 
+    //get our current dir
+    let curr_dir = std::env::current_dir()
+        .expect("could not get current directory")
+        .to_owned().to_string_lossy().to_string();
+    
     //parse out yt-dlp arguments
     let search_arg = format!("ytsearch:'{}'", song.name.to_string() + " " + &song.artist);
     let dir_arg = format!("-P {}", dir);
     let name_arg = format!("-o{}", &song.video_id);
 
     //run yt-dlp
-    let mut cmd = Command::new("yt-dlp");
+    // let yt_dlp_location = format!("{}\\yt-dlp.exe", curr_dir);
+    let yt_dlp_location = format!("{}\\src\\yt-dlp.exe", curr_dir);
+    println!("{:?}", yt_dlp_location);
+    let mut cmd = Command::new(yt_dlp_location);
     let x = cmd.arg(search_arg)
         .arg("--extract-audio")
         .arg("--audio-format")
@@ -99,11 +108,11 @@ async fn download(song: &Song, dir: &str) -> bool{
         .arg(dir_arg)
         .arg(name_arg)
         .status();
-    cmd.creation_flags(0x08000000);
+    // cmd.creation_flags(0x08000000);
 
     match x { 
         Ok(_) => return true,
-        Err(_) => return false
+        Err(e) => {println!("{:?}", e); return false}
     }
 
 }
@@ -117,7 +126,42 @@ async fn get_image(image_url: &str, download_path: &str){
     let img = image::load_from_memory(&bytes).expect("could not load image");
     img.save(download_path).expect("could not save image");   
 }
+async fn download_process(window: tauri::Window, songs: Arc<Arc<Vec<Song>>>, dir: String) -> Result<(), String> {
 
+    for song in songs.to_vec(){
+
+        window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "Starting".to_string()})
+            .expect("could not send status update (START)");
+
+        let image_path = format!("{}/{}.jpg", dir, song.video_id);
+        println!("IMG PATH: {:?}", image_path);
+
+        get_image(&song.image_url, &image_path).await; 
+        window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "Downloading".to_string()})
+            .expect("could not send status update (IMAGE)");
+
+        let download_succsess = download_audio(&song, &dir).await;
+
+        if !download_succsess { 
+            window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "THREAD CRASHED!!!".to_string()})
+                .expect("could not send status update (AUDIO DOWNLOAD)");
+            println!("THREAD CRASHED!!! ALL SONGS DELIGATED TO THIS THREAD WILL NOT BE DOWNLOADED!");
+            continue;
+        }
+
+        window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "Finishing up".to_string()})
+            .expect("could not send status update (ID3 EDIT)");
+
+        edit_id3(&song, &dir, &image_path).await;
+        window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "done!".to_string()})
+            .expect("could not send status update (DONE)");
+
+    }
+
+    println!("THREAD DONE");
+    Ok(())
+
+}
 
 impl Downloader {
     async fn get_genre(&mut self, track: &JsonValue) -> Option<String>{
@@ -132,11 +176,11 @@ impl Downloader {
             .send().await.unwrap();
 
         //make sure it went though
-        if response.status() != 200 { println!("it did not work"); return None} 
+        if response.status() != 200 { println!("COULD NOT GET SONG GENRE"); return None} 
             
         //parse the response
-        let res =  response.text().await.expect("could not parse response");
-        let json_res = json::parse(&res).expect("could not parse json");
+        let res =  response.text().await.expect("could not parse GENRE response");
+        let json_res = json::parse(&res).expect("could not parse GENRE json");
 
         //extract le genre
         let mut genre = "null".to_string();
@@ -148,7 +192,6 @@ impl Downloader {
 
     }
     async fn parse_song_data(&mut self, track: &JsonValue) -> Song {
-
 
         //get album year
         let mut year = track["album"]["release_date"].as_str().unwrap().to_string();
@@ -180,7 +223,6 @@ impl Downloader {
         //generate an id for the song
         let rng = rand::thread_rng().gen_range(0..1000000);
 
-
         //set the data
         let temp_song_data = Song {
             video_id: rng,
@@ -194,13 +236,13 @@ impl Downloader {
             genre: self.get_genre(track).await.unwrap(),
         };
 
-        println!("{:?}", temp_song_data.name);
+        println!("SONG FOUND: {:?}", temp_song_data.name);
 
         //return it
         return temp_song_data
 
     }
-    async fn get_batch_data(&mut self, offset: usize){
+    async fn get_batch_data(&mut self, offset: usize) -> Result<Vec<Song>, String>{
 
         //get the batch data
         let client = reqwest::Client::new();
@@ -211,54 +253,153 @@ impl Downloader {
             .send().await.unwrap();
     
         if response.status() != 200 { 
-            println!("it did not work"); 
-            return 
+            println!("COULD NOT GET BATCH SONG DATA"); 
+            return Err("COULD NOT GET BATCH SONG DATA".to_string())
         } 
         
         //parse the response to json
-        let res =  response.text().await.expect("could not parse response");
-        let json_res = json::parse(&res).expect("could not parse json");
+        let res =  response.text().await.expect("could not parse song data response");
+        let json_res = json::parse(&res).expect("could not parse song data json");
         let res_len = json_res["items"].len();
 
         //parse out the relivant data
+        let mut songs = Vec::new();
         for i in 0..res_len {
             let track = &json_res["items"][i]["track"];
             let new_song = self.parse_song_data(track).await;
-            self.data.push(new_song.to_owned());
+            songs.push(new_song.to_owned());
 
             // each time this runs send out a signal to the client to show that this has completed 
-            let _ = self.window.emit("nameUpdate",  GenericUpdate{ id: new_song.video_id, text: new_song.name });
+            match &self.window { 
+                Some(window) => {
+                    window.emit("nameUpdate",  GenericUpdate{ id: new_song.video_id, text: new_song.name })
+                        .expect("could not send name update");
+                },
+                None => {
+                    println!("NO WINDOW");
+                }
+            }
         }
 
+        return Ok(songs);
         
     }
 
-    async fn start_handler(&mut self){
+    fn get_filenames(&self) -> Vec<String>{
+        let mut file_names = Vec::new(); 
 
-        //get the length of the playlist
-        // self.playlist_length = Some(self.get_length().await);
-        // println!("{:?}", self.playlist_length);
+        for entry in fs::read_dir(&self.download_dir).expect("failed to read") {
+            let entry = entry.expect("err reading entry");
+            let os_string = entry.file_name();
+            let filename = os_string.to_str().unwrap();
+            let parsed_filename = str::replace(filename, ".mp3", "").to_string();
 
-        //get all the tracks in the playlist
-        let mut offset: usize = 0;
-        while offset < self.playlist_length.unwrap() +100 as usize {
-            self.get_batch_data(offset).await;
-            offset += 100
+            println!("FOUND SONG ALREADY DOWNLOADED: {:?}", &parsed_filename);
+            file_names.push(parsed_filename);
         }
 
-        // start the download in another thread
-        let mut handles = Vec::new();
-        let chunk_size = self.data.len() / self.thread_count as usize;
+        file_names
+
+    }
+    async fn get_playlist_length(&self) -> Result<usize, String>{
+        let client = reqwest::Client::new();
+        let response = client.get(format!("https://api.spotify.com/v1/playlists/{}/", self.playlist_id))
+            .header(AUTHORIZATION, format!("Bearer {}", self.token)) 
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json")
+            .send().await.unwrap();
+    
+        //make sure the request went through
+        if response.status() != 200 { 
+            println!("could not get playlist length, response code: {:?}", response.status());
+            return Err("could not get playlist length".to_string())
+        }
+            
+        //parse the response, get the length
+        let res = response.text().await.expect("playlist data response could not be parsed");
+        let json_res = json::parse(&res).expect("playlist data json could not be parsed");
+
+        let length = &json_res["tracks"]["total"].as_usize().unwrap();
+        return Ok(*length as usize);
+    }
+    async fn get_playlist_items(&mut self) -> Result<Vec<Song>, String> {
+
+        //get all the iterms in the download dir
+        let already_downloaded_songs = self.get_filenames();
+
+        //get the length
+        match self.get_playlist_length().await { 
+            Ok(length) => {
+
+                //collect all the items in the playlist
+                let mut songs_collected = Vec::new();
+                let mut offset: usize = 0;
+                while offset < length +100 as usize {
+                    let song_batch = self.get_batch_data(offset).await
+                        .expect("get batch data failed");
+
+                    if song_batch.is_empty() {
+                        println!("SONG BATCH IS EMPTY");
+                    }
+
+                    println!("BATCH LEN: {:?}", &song_batch.len());
+
+                    //check if we already have the song downloaded
+                    for song in song_batch {
+                        if already_downloaded_songs.contains(&song.name){
+                            println!("soung already downloaded");
+                            self.window.as_ref().expect("no window found").emit("statusUpdate", GenericUpdate {id: song.video_id, text: "done!".to_string()})
+                                .expect("could not send status update (DONE)");
+                        } else { 
+                            songs_collected.push(song);
+                            println!("soung NOT already downloaded")
+                        }
+                    }
+
+                    offset += 100
+                }
+
+                println!("TOTAL COLLECTED LEN {:?}", songs_collected.len());
+                return Ok(songs_collected)
+            }
+            Err(_) => {
+                println!("PLAYLIST LENGTH ERROR");
+                return Err("something went wrong with discovery".to_string());
+            }
+        }
+    }
+
+    pub async fn start_handler(&mut self) -> Result<(), ()> {
+
+        //get all the tracks in the playlist
+        let songs = self.get_playlist_items().await.expect("get_playlist_items failed");
+        if songs.len() == 0 { 
+            println!("evreythings already downloaded");
+            return Ok(());
+        }
+        
+        self.data = songs;
+
+        //get an appropriate thread ammount
+        let mut chunk_size = 1;
+        if self.data.len() < self.thread_count as usize { 
+            chunk_size = self.data.len();
+            println!("songs less then playlist count")
+        } else { 
+            chunk_size = self.data.len() / self.thread_count as usize;
+            println!("songs more then playlist count, using thread count")
+        }
 
         //mutexify relavant variables
         let window_mutx = Arc::new(Mutex::new(&self.window));
         let dir_mutx = Arc::new(Mutex::new(&self.download_dir));
         let items_mutx = Arc::new(Mutex::new(&self.data));
+
         let chunks: Vec<_> = items_mutx.lock().unwrap().chunks(chunk_size)
             .map(|chunk| Arc::new(chunk.to_vec()))
             .collect();
 
-        println!("downloading");
+        println!("DOWNLOAD STARTING");
         for chunk in chunks {
             let chunk_mutx = Arc::new(chunk);
             let chunk_clone = chunk_mutx.clone();
@@ -267,113 +408,177 @@ impl Downloader {
             let dir_useable = dir_clone.lock().unwrap().clone();
 
             let window_clone = window_mutx.clone();
-            let window_useable = window_clone.lock().unwrap().clone();
+            let window_useable = match window_clone.lock().unwrap().clone() {
+                Some(window) => window,
+                None => panic!("window not found")
+            };
 
             let handle = tokio::spawn(async move {
-                for song in chunk_clone.to_vec(){
-
-                    let _ = window_useable.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "Starting".to_string()});
-
-                    let image_path = format!("{}/{}.jpg", dir_useable, song.video_id);
-                    get_image(&song.image_url, &image_path).await; 
-                    let _ = window_useable.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "Downloading".to_string()});
-
-                    let download_succsess = download(&song, &dir_useable).await;
-                    if !download_succsess { 
-                        let _ = window_useable.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "THREAD CRASHED!!!".to_string()});
-                        continue;
-                    }
-                    let _ = window_useable.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "Finishing up".to_string()});
-
-                    edit_id3(&song, &dir_useable, &image_path).await;
-                    let _ = window_useable.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "done!".to_string()});
-
-                }
+                download_process(window_useable, chunk_clone, dir_useable)
+                    .await
+                    .expect("download process failed");
             });
-
-            handles.push(handle);
+            
+            if self.threads.is_none() { 
+                let mut list = Vec::new();
+                list.push(handle);
+                self.threads = Some(list);
+            } else { 
+                self.threads.as_mut().unwrap().push(handle);
+            }
+            
         } 
 
-        futures::future::join_all(handles).await;
+        self.stop_handler().await;
+        Ok(())
 
     }
-
-}
-
-pub async fn get_playlist_data(playlist_id: String)-> Result<JsonValue, String>{
-    match get_token().await {
-        Ok(token) => { 
-            let client = reqwest::Client::new();                                                                                //haha 69 its the funny number
-            let response = client.get(format!("https://api.spotify.com/v1/playlists/{}/", playlist_id))
-                .header(AUTHORIZATION, format!("Bearer {}", token)) 
-                .header(CONTENT_TYPE, "application/json")
-                .header(ACCEPT, "application/json")
-                .send().await.unwrap();
-        
-            //make sure the request went through
-            if response.status() != 200 { 
-                println!("could not get playlist length, response code: {:?}", response.status());
-                return Err("could not get playlist length".to_string())
-            }
-                
-            //parse the response, get the length
-            let res = response.text().await.expect("response could not be parsed");
-            let json_res = json::parse(&res).expect("json could not be parsed");
-            return Ok(json_res)
-        }
-        Err(_) => Err("something bad happened".to_string())
-    }
-}
-
-#[tauri::command]
-pub async fn start_download(url: &str, token: &str, window: tauri::Window) -> Result<String, String> {   
-
-    let data = get_playlist_data(url.replace("https://open.spotify.com/playlist/", "")).await;
-    println!("download");
-    match data { 
-        Ok(data) => {
-
-            //get some data
-            let playlist_name = &data["name"].to_string();
-            let length = &data["tracks"]["total"].as_usize().unwrap();
-
-            //create the download dir
-            let mut download_dir = dirs::desktop_dir().expect("err");
-            download_dir.push("music");
-            download_dir.push(playlist_name);
-
-            //check if the new download dir exists, create it if not
-            if !download_dir.exists(){
-                let _ = fs::create_dir_all(&download_dir);
-            }
-
-            //start the download
-            match super::config::get_config() {
-                Ok(config) => {
-                    let mut downloader = Downloader {
-                        window: window,
-                        download_dir: download_dir.to_owned().to_string_lossy().to_string(),
-                        token: token.to_string(),
-                        playlist_id: url.replace("https://open.spotify.com/playlist/", ""),
-                        playlist_length: Some(length.to_owned()),
-                        data: Vec::new(),
-                        thread_count: config.thread_count
-                    };
-                
-                    let _ = downloader.start_handler().await;
-                    return Ok("a".to_string());
+    pub async fn stop_handler(&mut self){           //i dont wanna talk about it
+        match self.threads.as_mut() {
+            Some(threads) => {
+                for handle in threads { 
+                    let x = handle;
+                    println!("{:?}", x)
                 }
-                Err(err) => { println!("Error: {}", err); return Err(err); }
             }
-        }
-        Err(_) => return Err("ksjdfhnsdjkfh".to_string())
+            None => {
+                println!("no threads to stop")
+            }
+        } 
+
+    }
+    pub async fn abort_handler(&mut self){
+        match self.threads.as_mut() {
+            Some(threads) => {
+                for handle in threads { 
+                    handle.abort();
+                }
+            }
+            None => {
+                println!("no threads to stop")
+            }
+        } 
+
     }
 
+    pub fn set_window(&mut self, window: tauri::Window){
+        self.window = Some(window);
+    }
+    pub fn set_token(&mut self, token: String){
+        self.token = token
+    }
+    pub fn set_url(&mut self, url: String){
+        self.playlist_id = url.replace("https://open.spotify.com/playlist/", "")
+    }
+    pub async fn set_download_dir(&mut self) -> Result<(), String>{
+        
+        //get the playlist name
+        let client = reqwest::Client::new();
+        let response = client.get(format!("https://api.spotify.com/v1/playlists/{}/", self.playlist_id))
+            .header(AUTHORIZATION, format!("Bearer {}", self.token)) 
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json")
+            .send().await.unwrap();
+    
+        //make sure the request went through
+        if response.status() != 200 { 
+            println!("could not get playlist name, response code: {:?}", response.status());
+            return Err("could not get playlist name".to_string())
+        }
+            
+        //parse the response, get the name
+        let res = response.text().await.expect("playlist data response could not be parsed");
+        let json_res = json::parse(&res).expect("playlist data json could not be parsed");
+        let playlist_name = &json_res["name"].to_string();
+
+        //create the download dir
+        let mut download_dir = dirs::desktop_dir().expect("COULD NOT FIND USERS DESKTOP");
+        download_dir.push("music");
+        download_dir.push(playlist_name);
+
+        //check if the new download dir exists, create it if not
+        if !download_dir.exists(){
+            let _ = fs::create_dir_all(&download_dir);
+        }
+
+        self.download_dir = download_dir.to_owned().to_string_lossy().to_string();
+
+        return Ok(())
+
+    }
+    pub fn set_config(&mut self) -> Result<(), String>{
+        match super::config::get_config() {
+            Ok(config) => {
+                self.thread_count = config.thread_count;
+                return Ok(())
+            }
+            Err(e) => {
+                return Err(e)
+            }
+        }; 
+    }
+
+    pub fn new() -> Self {
+        return Downloader {
+            window: None,
+            download_dir: "".to_string(),
+            token: "".to_string(),
+            playlist_id: "".to_string(),
+            data: Vec::new(),
+            thread_count: 0,
+            threads: None
+        };
+    }
 
 }
 
+pub async fn get_playlist_data(playlist_id: String, token: &str)-> Result<JsonValue, String>{
+
+    let client = reqwest::Client::new();
+    let response = client.get(format!("https://api.spotify.com/v1/playlists/{}/", playlist_id))
+        .header(AUTHORIZATION, format!("Bearer {}", token)) 
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json")
+        .send().await.unwrap();
+
+    //make sure the request went through
+    if response.status() != 200 { 
+        println!("could not get playlist length, response code: {:?}", response.status());
+        return Err("could not get playlist length".to_string())
+    }
+        
+    //parse the response, get the length
+    let res = response.text().await.expect("playlist data response could not be parsed");
+    let json_res = json::parse(&res).expect("playlist data json could not be parsed");
+    return Ok(json_res)
+}
+
+
 #[tauri::command]
-pub async fn check_link(url: &str, token: &str) -> Result<bool, bool>{
+pub async fn start_download(handler: State<'_, tokio::sync::Mutex<Downloader>>, window: tauri::Window, url: String, token: String) -> Result<(), ()>{
+    println!("starting download");
+    let mut useable_hander = handler.lock().await;
+    useable_hander.set_window(window);
+    useable_hander.set_token(token.to_string());
+    useable_hander.set_url(url.to_string());
+    useable_hander.set_config().expect("err");
+    useable_hander.set_download_dir().await.expect("COULD NOT CREARE OR FIND DOWNLOAD DIRECTORY");
+    let _ = useable_hander.start_handler().await;
+    println!("done");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_download(handler: State<'_, tokio::sync::Mutex<Downloader>>) -> Result<(), ()> {
+    let mut useable_hander = handler.lock().await;
+    useable_hander.abort_handler().await;
+    Ok(())
+}
+
+
+#[tauri::command]
+pub async fn check_link(url: &str, token: &str) -> Result<bool, String>{
+    println!("check url {}", url);
 
     let url_parsed = url
         .replace("https://open.spotify.com/playlist/", "");
@@ -387,11 +592,11 @@ pub async fn check_link(url: &str, token: &str) -> Result<bool, bool>{
     
     //make sure the request went through
     if response.status() != 200 { 
-        println!("could not get playlist length, response code: {:?}", response.status()); 
-        return Err(false);
+        println!("invalid playlist url!, response code: {:?}", response.status()); 
+        return Err("invalid playlist url!".to_string());
     }
 
-    println!("{:?}" ,response.status());
+    println!("playlist link OK");
     Ok(true)
 }
 
@@ -408,7 +613,10 @@ pub async fn get_token() -> Result<String, String>{
                 .send().await.unwrap();
         
             //make sure it was successful
-            if response.status() != 200 {println!("invaliad credentals, response code {:?}", response.status()); return Err("credientals invalid!".to_string());}
+            if response.status() != 200 {
+                println!("invaliad credentals, response code {:?}", response.status()); 
+                return Err("credientals invalid!".to_string());
+            }
             
             //parse to json, extract and return token 
             let res =  response.text().await.expect("could not parse response");
