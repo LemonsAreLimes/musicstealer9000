@@ -10,13 +10,11 @@ use reqwest;
 use reqwest::header::{ ACCEPT, AUTHORIZATION, CONTENT_TYPE };
 use json::JsonValue;
 use rand::Rng;
-// use tokio::{task::JoinHandle};
 use image;
 use id3::{ Tag, TagLike, Version };
 use id3_image::embed_image;
 use dirs;
 use tauri::State;
-// use tokio::sync::Mutex;
 
 #[derive(Debug, Deserialize)]
 struct AcsessTokenResponse {
@@ -51,6 +49,7 @@ pub struct Downloader {
     data: Vec<Song>,
     thread_count: u32,
     threads: Option<Vec<tokio::task::JoinHandle<()>>>,
+    yt_dlp_install_type: String,
 } 
 
 async fn edit_id3(track: &Song, track_path: &str, image_path: &str){
@@ -84,21 +83,24 @@ async fn edit_id3(track: &Song, track_path: &str, image_path: &str){
 
 
 }
-async fn download_audio(song: &Song, dir: &str) -> bool{
+async fn download_audio(song: &Song, dir: &str, install_type: &str) -> bool{
 
-    //get our current dir
-    let curr_dir = std::env::current_dir()
-        .expect("could not get current directory")
-        .to_owned().to_string_lossy().to_string();
-    
+    let mut yt_dlp_location = "yt-dlp".to_string();
+    if install_type == "local" {
+        //get our current dir
+        let curr_dir = std::env::current_dir()
+            .expect("could not get current directory")
+            .to_owned().to_string_lossy().to_string();
+        
+        yt_dlp_location = format!("{}\\yt-dlp.exe", curr_dir);
+    }
+
     //parse out yt-dlp arguments
     let search_arg = format!("ytsearch:'{}'", song.name.to_string() + " " + &song.artist);
     let dir_arg = format!("-P {}", dir);
     let name_arg = format!("-o{}", &song.video_id);
 
     //run yt-dlp
-    // let yt_dlp_location = format!("{}\\yt-dlp.exe", curr_dir);
-    let yt_dlp_location = format!("{}\\src\\yt-dlp.exe", curr_dir);
     println!("{:?}", yt_dlp_location);
     let mut cmd = Command::new(yt_dlp_location);
     let x = cmd.arg(search_arg)
@@ -126,7 +128,7 @@ async fn get_image(image_url: &str, download_path: &str){
     let img = image::load_from_memory(&bytes).expect("could not load image");
     img.save(download_path).expect("could not save image");   
 }
-async fn download_process(window: tauri::Window, songs: Arc<Arc<Vec<Song>>>, dir: String) -> Result<(), String> {
+async fn download_process(window: tauri::Window, songs: Arc<Arc<Vec<Song>>>, dir: String, install_type: String) -> Result<(), String> {
 
     for song in songs.to_vec(){
 
@@ -140,7 +142,7 @@ async fn download_process(window: tauri::Window, songs: Arc<Arc<Vec<Song>>>, dir
         window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "Downloading".to_string()})
             .expect("could not send status update (IMAGE)");
 
-        let download_succsess = download_audio(&song, &dir).await;
+        let download_succsess = download_audio(&song, &dir, &install_type).await;
 
         if !download_succsess { 
             window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "THREAD CRASHED!!!".to_string()})
@@ -157,6 +159,8 @@ async fn download_process(window: tauri::Window, songs: Arc<Arc<Vec<Song>>>, dir
             .expect("could not send status update (DONE)");
 
     }
+    window.emit("threadDone", "")
+        .expect("could not send status update (thread finished)");
 
     println!("THREAD DONE");
     Ok(())
@@ -371,6 +375,11 @@ impl Downloader {
 
     pub async fn start_handler(&mut self) -> Result<(), ()> {
 
+        //send event to client, disableing the download/stop button
+        self.window.as_ref().expect("no window available")
+            .emit("disableStop", "")
+            .expect("could not emit event");
+
         //get all the tracks in the playlist
         let songs = self.get_playlist_items().await.expect("get_playlist_items failed");
         if songs.len() == 0 { 
@@ -390,10 +399,16 @@ impl Downloader {
             println!("songs more then playlist count, using thread count")
         }
 
+        //re-enable stop signal
+        self.window.as_ref().expect("no window available")
+            .emit("enableStop", "")
+            .expect("could not emit event");
+
         //mutexify relavant variables
         let window_mutx = Arc::new(Mutex::new(&self.window));
         let dir_mutx = Arc::new(Mutex::new(&self.download_dir));
         let items_mutx = Arc::new(Mutex::new(&self.data));
+        let install_type_mutx = Arc::new(Mutex::new(&self.yt_dlp_install_type));
 
         let chunks: Vec<_> = items_mutx.lock().unwrap().chunks(chunk_size)
             .map(|chunk| Arc::new(chunk.to_vec()))
@@ -401,6 +416,8 @@ impl Downloader {
 
         println!("DOWNLOAD STARTING");
         for chunk in chunks {
+            let install_type_clone = install_type_mutx.lock().unwrap().clone();
+
             let chunk_mutx = Arc::new(chunk);
             let chunk_clone = chunk_mutx.clone();
             
@@ -414,7 +431,7 @@ impl Downloader {
             };
 
             let handle = tokio::spawn(async move {
-                download_process(window_useable, chunk_clone, dir_useable)
+                download_process(window_useable, chunk_clone, dir_useable, install_type_clone)
                     .await
                     .expect("download process failed");
             });
@@ -429,36 +446,28 @@ impl Downloader {
             
         } 
 
-        self.stop_handler().await;
+        // self.stop_handler().await;
         Ok(())
 
     }
-    pub async fn stop_handler(&mut self){           //i dont wanna talk about it
-        match self.threads.as_mut() {
-            Some(threads) => {
-                for handle in threads { 
-                    let x = handle;
-                    println!("{:?}", x)
-                }
-            }
-            None => {
-                println!("no threads to stop")
-            }
-        } 
-
-    }
-    pub async fn abort_handler(&mut self){
+    pub async fn stop_handler(&mut self){
         match self.threads.as_mut() {
             Some(threads) => {
                 for handle in threads { 
                     handle.abort();
                 }
+                self.window.as_ref().expect("window stuff")
+                    .emit("downloadFinish", "")
+                    .expect("no");
+
+                self.download_dir = "".to_string();
+                self.playlist_id = "".to_string();
+                self.token = "".to_string(); 
             }
             None => {
                 println!("no threads to stop")
             }
         } 
-
     }
 
     pub fn set_window(&mut self, window: tauri::Window){
@@ -517,6 +526,10 @@ impl Downloader {
             }
         }; 
     }
+    pub fn set_install_type(&mut self){
+        let install_type = super::config::ytdlp_check().expect("not installed");
+        self.yt_dlp_install_type = install_type;
+    }
 
     pub fn new() -> Self {
         return Downloader {
@@ -526,7 +539,8 @@ impl Downloader {
             playlist_id: "".to_string(),
             data: Vec::new(),
             thread_count: 0,
-            threads: None
+            threads: None,
+            yt_dlp_install_type: "".to_string(),
         };
     }
 
@@ -553,16 +567,30 @@ pub async fn get_playlist_data(playlist_id: String, token: &str)-> Result<JsonVa
     return Ok(json_res)
 }
 
-
 #[tauri::command]
 pub async fn start_download(handler: State<'_, tokio::sync::Mutex<Downloader>>, window: tauri::Window, url: String, token: String) -> Result<(), ()>{
     println!("starting download");
     let mut useable_hander = handler.lock().await;
-    useable_hander.set_window(window);
+
+    //these vars dont need to change
+    if useable_hander.window == None { 
+        useable_hander.set_window(window);
+    }
+
+    if useable_hander.thread_count == 0 { 
+        useable_hander.set_config().expect("err");
+    }
+
+    if useable_hander.yt_dlp_install_type == "" {
+        useable_hander.set_install_type();
+    }
+
+    //these do though
     useable_hander.set_token(token.to_string());
     useable_hander.set_url(url.to_string());
-    useable_hander.set_config().expect("err");
-    useable_hander.set_download_dir().await.expect("COULD NOT CREARE OR FIND DOWNLOAD DIRECTORY");
+    useable_hander.set_download_dir().await.expect("COULD NOT CREATE OR FIND DOWNLOAD DIRECTORY");
+
+    //start the download
     let _ = useable_hander.start_handler().await;
     println!("done");
     Ok(())
@@ -571,10 +599,9 @@ pub async fn start_download(handler: State<'_, tokio::sync::Mutex<Downloader>>, 
 #[tauri::command]
 pub async fn stop_download(handler: State<'_, tokio::sync::Mutex<Downloader>>) -> Result<(), ()> {
     let mut useable_hander = handler.lock().await;
-    useable_hander.abort_handler().await;
+    useable_hander.stop_handler().await;
     Ok(())
 }
-
 
 #[tauri::command]
 pub async fn check_link(url: &str, token: &str) -> Result<bool, String>{
@@ -599,7 +626,6 @@ pub async fn check_link(url: &str, token: &str) -> Result<bool, String>{
     println!("playlist link OK");
     Ok(true)
 }
-
 
 #[tauri::command]
 pub async fn get_token() -> Result<String, String>{
