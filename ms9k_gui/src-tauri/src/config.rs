@@ -1,7 +1,12 @@
-use std::{fs, io::Write};
-use std::fs::File;
+use std::{
+    fs, 
+    fs::File,
+    io::{ Write, Cursor },
+    process::Command,
+};
 use serde::{Deserialize, Serialize};
 use serde_json;
+use reqwest;    //for downloading ytdlp
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Playlist {
@@ -77,6 +82,7 @@ fn write_config(new_config: Config){
     }
 }
 
+
 #[tauri::command]
 pub fn get_thread_count() -> String {
     match get_config() {
@@ -98,6 +104,7 @@ pub fn set_thread_count(threadCount: u32){
     };
 }
 
+
 #[allow(non_snake_case)]
 #[tauri::command]
 pub fn set_credentials( clientId: &str, clientSecret: &str){
@@ -108,6 +115,37 @@ pub fn set_credentials( clientId: &str, clientSecret: &str){
             write_config(config);
         }
         Err(_) => { return }
+    }
+}
+
+
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn set_playlist(playlistId: String, token: &str) -> Result<String, String>{
+    let url_parsed = playlistId
+        .replace("https://open.spotify.com/playlist/", "");
+    
+    let data = super::spotify_api::get_playlist_data(url_parsed.to_string(), token).await;
+    match data { 
+        Ok(data) => {
+
+            let new_playlist = Playlist {
+                name: data["name"].to_string(),
+                id: url_parsed,
+                image_url: data["images"][0]["url"].to_string(),
+                download_dir: "Default".to_string()
+            };
+
+            match get_config() {
+                Ok(mut config) => { 
+                    config.playlists.push(new_playlist);                    
+                    write_config(config);
+                    return Ok("Playlist updated successfully".to_string());
+                }
+                Err(_) => return Err("couldn't write config".to_string())
+            }
+        }
+        Err(_) => return Err("uhh".to_string())
     }
 }
 
@@ -139,32 +177,39 @@ pub fn remove_playlist(playlistId: String){
     }
 } 
 
-#[allow(non_snake_case)]
+
 #[tauri::command]
-pub async fn set_playlist(playlistId: String) -> Result<String, String>{
-    let url_parsed = playlistId
-        .replace("https://open.spotify.com/playlist/", "");
-    
-    let data = super::spotify_api::get_playlist_data(url_parsed.to_string()).await;
-    match data { 
-        Ok(data) => {
+pub async fn download_ytdlp(){
+    let url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+    let response = reqwest::get(url).await.expect("couldn't get download url");
+    let mut file = std::fs::File::create("yt-dlp.exe").expect("could not create yt-dlp file");
+    let mut content =  Cursor::new(response.bytes().await.expect("couldn't write to yt-dlp"));
+    println!("{:?}", content);
+    let _ = std::io::copy(&mut content, &mut file);
+}
 
-            let new_playlist = Playlist {
-                name: data["name"].to_string(),
-                id: url_parsed,
-                image_url: data["images"][0]["url"].to_string(),
-                download_dir: "Default".to_string()
-            };
+#[tauri::command]
+pub fn ytdlp_check() -> Result<String, ()> {
 
-            match get_config() {
-                Ok(mut config) => { 
-                    config.playlists.push(new_playlist);                    
-                    write_config(config);
-                    return Ok("Playlist updated successfully".to_string());
-                }
-                Err(_) => return Err("couldn't write config".to_string())
-            }
-        }
-        Err(_) => return Err("uhh".to_string())
+    //check if ytdlp is installed globally
+    let cmd: Result<std::process::ExitStatus, std::io::Error> = Command::new("yt-dlp").status();
+    let is_global = match cmd { 
+        Ok(_) => true,
+        Err(_) => false,
+    };
+
+    if is_global { return Ok("global".to_string()); }
+
+    let curr_dir = std::env::current_dir()
+        .expect("could not get current directory")
+        .to_owned().to_string_lossy().to_string();
+
+    let yt_dlp_location = format!("{}\\yt-dlp.exe", curr_dir);
+    println!("checking: {:?}", yt_dlp_location);
+    let cmd = Command::new(yt_dlp_location).status();
+    match cmd { 
+        Ok(_) => return Ok("local".to_string()),
+        Err(_) => {return Err(())}
     }
+
 }
