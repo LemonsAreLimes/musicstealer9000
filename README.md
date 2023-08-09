@@ -12,6 +12,7 @@ Are you tired of your music library being a chaotic mess, making it difficult to
 ## Important Note: yt-dlp Dependency ##
 
 Before installing and using Music Stealer 9000, please be aware that the software requires yt-dlp to be installed on your system to access certain features. yt-dlp is a powerful command-line tool for downloading videos from YouTube and other supported sites. its binaries can be found at: https://github.com/yt-dlp/yt-dlp#release-files.
+alternitvely, yt-dlp will atuomatically be installed if not detcted.
 
 ## Important Note: Spotify API Key Requirement ##
 Before proceeding with the installation and use of Music Stealer 9000, it is essential to be aware that the software relies on the Spotify API. To fully utilize these features, you will need to obtain a valid Spotify API key. heres what you need to do:
