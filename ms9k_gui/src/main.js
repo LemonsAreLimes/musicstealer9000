@@ -1,6 +1,8 @@
 const { invoke } = window.__TAURI__.tauri;
 const { emit, listen } = window.__TAURI__.event; 
 
+//event handlers
+
 listen("statusUpdate", (e)=>{
   if (e.payload.text == "done!"){
     document.getElementById(e.payload.id).remove()
@@ -18,11 +20,57 @@ listen("nameUpdate", (e)=>{
   `
 })
 
+listen("downloadFinish", (e)=>{
+  console.log("Download finished")
+  let button = document.getElementById("download_button")
+  document.getElementById("playlist_items").innerHTML = " "
+  button.dataset.status = "standby"
+  button.innerText = "Download!"
+})
+
+listen("disableStop", ()=> {
+  console.log("Disable Stop")
+  let elem = document.getElementById("download_button")
+  elem.dataset.status = "disabled"
+  elem.style = "cursor: default; color: #776f6f; outline: 1px solid red"
+
+})
+
+listen("enableStop", ()=>{
+  console.log("Enable Stop")
+  let elem = document.getElementById("download_button")
+  elem.dataset.status = "downloading"
+  elem.style = ""
+})
+
+listen("threadDone", async ()=> {
+
+  let elem = document.getElementById("threadCount")
+  let thread_ammount = parseInt(elem.dataset.count)
+  let finished_ammount = parseInt(elem.dataset.finished) + 1 
+  if (finished_ammount >= thread_ammount) {
+    
+    console.log("all threads finished")
+
+    //kill all the threads (this is a weird workaround)
+    //because calling futures::future::join_all(self.threads.take().unwrap()).await
+    //prevents the threads from being aborted
+    await invoke("stop_download")
+    elem.dataset.finished = 0
+
+  } else { 
+    elem.dataset.finished = finished_ammount
+  }
+
+})
+
+//evreything else
+
 let download_button = async () => {
   console.log("download func")
-
   let button = document.getElementById("download_button")
-  console.log(button.dataset.status)
+
+  if ( button.dataset.status == "disabled" ){return}
 
   //if we are not already downloading, then download
   if( button.dataset.status == "standby" ){ 
@@ -57,16 +105,11 @@ let download_button = async () => {
     button.dataset.status = "standby"
     button.innerText = "Download!"
     await invoke("stop_download")
+    document.getElementById("playlist_items").innerHTML = ""
   }
 
 }
 
-let add_playlist = async () => {
-  let token = document.querySelector("body").dataset.token
-  let playlist_id = document.querySelector("#playlist_link").value
-  if ( playlist_id == "" || playlist_id == " " ) { return }
-  await invoke("set_playlist", {playlistId: playlist_id, token: token});
-}
 async function open_main_page(){
   let threadcount = await invoke("get_thread_count");
 
@@ -75,12 +118,12 @@ async function open_main_page(){
   <input id="playlist_link" placeholder="playlist link" >
   <div class="button_container">
     <button id="add_button""><i class="fa-solid fa-plus"></i></button>
-    <button id="download_button"" data-status="standby" >Download!</button>
+    <button id="download_button" data-status="standby" >Download!</button>
   </div>
   <div id="playlist_items">
   </div>
   <div id="config">
-    <div id="threadCount" data-count="${threadcount}">
+    <div id="threadCount" data-count="${threadcount}" data-finished="0">
       <p id="threadText">Threads: ${threadcount}</p>
       <div id="threadUpButton">
         <i class="fa-solid fa-chevron-up "></i>
@@ -92,7 +135,6 @@ async function open_main_page(){
     <div id="playlist_select" data-selected="None"></div>
     </div>
   </div>`
-  // <button id="folderSelect" onclick="openFileInput()">Chose a directory</button>
   document.querySelector("#download_button").addEventListener("click", download_button)
   document.querySelector("#threadDownButton").addEventListener("click", decreceThreadCount)
   document.querySelector("#threadUpButton").addEventListener("click", increceThreadCount)
@@ -118,23 +160,28 @@ async function open_main_page(){
   document.querySelectorAll(".playlist").forEach(playlist =>{
     playlist.addEventListener("mouseenter", show_playlist_options)
     playlist.addEventListener("mouseleave", hide_playlist_options)
-    playlist.addEventListener("mousedown", toggle_playlist)
   });
+
+  //this needs to be different because of child elements
+  //adds in click functionality to playlists
+  let x = document.getElementsByClassName("playlist")
+  console.log(x.length)
+  for (let i = 0; i <= x.length; i++){
+    try {
+
+      x[i].addEventListener("click", () => {
+        playlist_click(x[i].getAttribute("id"))
+      })
+
+    } catch {
+      console.log("not an element")
+    }
+  }
 
   document.querySelectorAll(".playlist_button").forEach(button=>{ 
     button.addEventListener("click", playlist_buttons)
   })
 
-}
-
-let playlist_buttons = async (e)=>{
-  console.log(e.srcElement.dataset.id)
-  if (e.srcElement.dataset.type == "trash"){
-    console.log("trash")
-    await invoke("remove_playlist", {playlistId: e.srcElement.dataset.id})
-  } else if (e.srcElement.dataset.type == "settings"){
-    console.log("settings")
-  }
 }
 
 let test_client_credentials = async () => {
@@ -203,6 +250,15 @@ let increceThreadCount = async ()=>{
   await invoke("set_thread_count", {threadCount: parseInt(count)+1})
 }
 
+//playlist stuff
+
+let add_playlist = async () => {
+  let token = document.querySelector("body").dataset.token
+  let playlist_id = document.querySelector("#playlist_link").value
+  if ( playlist_id == "" || playlist_id == " " ) { return }
+  await invoke("set_playlist", {playlistId: playlist_id, token: token});
+}
+
 let show_playlist_options = async (e) => {
   let options_elem = e.srcElement.getElementsByClassName("playlist_options")[0]
   options_elem.style = "opacity: 100; transition: opacity 0.15s ease-in-out"
@@ -213,34 +269,64 @@ let hide_playlist_options = async (e) => {
   options_elem.style = "opacity: 0; transition: opacity 0.15s ease-in-out"
 }
 
-let toggle_playlist = async (e) => {
-  let is_selected = e.srcElement.dataset.selected
+let playlist_buttons = async (e)=>{
+  console.log(e.srcElement.dataset.id)
+  if (e.srcElement.dataset.type != "trash"){
+    console.log("unknown event!")
+    return
+  }
+  console.log("playlist remove")
+  await invoke("remove_playlist", {playlistId: e.srcElement.dataset.id})
+}
+
+function playlist_click(id) {
+  let srcElem = document.getElementById(id)
+  let is_selected = srcElem.dataset.selected
 
   //select
-  if (!parseInt(is_selected) && e.srcElement.className=="playlist"){
-    e.srcElement.style = "background-color: #272727;"
-    e.srcElement.dataset.selected = 1
+  if (!parseInt(is_selected) && srcElem.className=="playlist"){
+    srcElem.style = "background-color: #272727;"
+    srcElem.dataset.selected = 1
 
     //deslect any already selected items
     let prev_selected_id = document.querySelector("#playlist_select").dataset.selected 
     if (prev_selected_id && prev_selected_id!="None"){
-      document.querySelector(`#${prev_selected_id}`).dataset.selected = "None"
-      document.querySelector(`#${prev_selected_id}`).style = ""
+      let prev_elem = document.getElementById(prev_selected_id)
+      prev_elem.dataset.selected = "None"
+      prev_elem.style = ""
     }
 
-    document.querySelector("#playlist_select").dataset.selected = e.srcElement.id
-    document.querySelector("#playlist_link").value = e.srcElement.id
+    document.querySelector("#playlist_select").dataset.selected = id
+    document.querySelector("#playlist_link").value = id
   } 
 
   //deslect
-  else if (parseInt(is_selected) && e.srcElement.className=="playlist"){
-    e.srcElement.style = ""
-    e.srcElement.dataset.selected = 0
-    document.querySelectorAll(`#${prev_selected_id}`).dataset.selected = "None"
+  else if (parseInt(is_selected) && srcElem.className=="playlist"){
+    srcElem.style = ""
+    srcElem.dataset.selected = 0
+    document.getElementById(prev_selected_id).dataset.selected = "None"
   }
 }
 
+//onload process
+
 window.addEventListener("DOMContentLoaded", async () => {
+
+  //check for yt-dlp 
+  try {
+    let is_installed = await invoke("ytdlp_check")
+    console.log(is_installed)
+  }
+  catch { 
+    console.log("Please install YTDLP")
+    let install_response = await window.confirm("automatically install YTDLP?")
+   
+    if(install_response){
+      await invoke("download_ytdlp")
+    }
+  }
+
+  //check for valid credentials
   try {
     let token = await invoke("get_token");
     console.log(token)
