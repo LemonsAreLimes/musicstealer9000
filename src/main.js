@@ -54,8 +54,6 @@ listen("threadDone", async ()=> {
     console.log("all threads finished")
 
     //kill all the threads (this is a weird workaround)
-    //because calling futures::future::join_all(self.threads.take().unwrap()).await
-    //prevents the threads from being aborted
     await invoke("stop_download")
     elem.dataset.finished = 0
 
@@ -65,114 +63,43 @@ listen("threadDone", async ()=> {
 
 })
 
-let decreceThreadCount = async ()=>{
-  let count = document.querySelector("#threadCount").dataset.count
-  if( count == 1 ){ 
-    await invoke("set_thread_count", {threadCount: parseInt(count)})  
-    return 
-  }
-  document.querySelector("#threadCount").dataset.count = parseInt(count) - 1
-  document.querySelector("#threadText").textContent = `Threads: ${parseInt(count)-1}`
-  await invoke("set_thread_count", {threadCount: parseInt(count)-1})
-}
-
-let increceThreadCount = async ()=>{
-  let count = document.querySelector("#threadCount").dataset.count
-  document.querySelector("#threadCount").dataset.count = parseInt(count) + 1
-  document.querySelector("#threadText").textContent = `Threads: ${parseInt(count)+1}`
-  await invoke("set_thread_count", {threadCount: parseInt(count)+1})
-}
-
-//playlist stuff
-
 //onload process
-
 window.addEventListener("DOMContentLoaded", async () => {
 
-  //check for yt-dlp 
-  try {
-    let is_installed = await invoke("ytdlp_check")
-    console.log(is_installed)
-  }
-  catch { 
-    console.log("Please install YTDLP")
-    let install_response = await window.confirm("automatically install YTDLP?")
-   
-    if(install_response){
-      await invoke("download_ytdlp")
-    }
+  //check for yt-dlp
+  //warn the user that its not installed, dont install it.
+  try { 
+    await invoke("ytdlp_check")
+  } catch { 
+    alert("yt-dlp is not installed, nothing will download if its not installed!")
   }
 
-  //check for valid credentials
+  //check if the config exists
   try {
-    let token = await invoke("get_token");
-    console.log(token)
-    document.querySelector("body").dataset.token = token
-    pages.download()
-    return
+    await invoke("get_config")
   } catch { 
-    pages.credential()
-    return
+    //nothing really needs to happen here
+    console.log('no config found')
   }
+
+  //beyond this point the config should exist
+
+  pages.default()  
 });
 
+//TODO: tab switcher breaks page height, will need to be changed or allow for scrolling
+//TODO: add the ability to download into diffrent formats
+  //non-mp3 formats will not have id3 
 
-
-// let set_value = async (e) => {
-//   let config = await invoke("get_config")
-//   console.log(config)
-
-//   let id = e.srcElement.id
-//   let value = e.srcElement.checked
-
-//   //thread count ticker thing
-//   if (id == "thread_count"){
-//     config["thread_count"] = parseInt(e.srcElement.value)
-//     await invoke("write_config_from_string", {newConfig: JSON.stringify(config)})
-//     return
-//   }
-
-//   // disable options related to image download, send back-end respective information
-//   if (id == "image_download"){
-//     document.querySelector("#image_options")
-//       .querySelectorAll("input")
-//       .forEach(async elem => {
-//         elem.disabled = !value
-//         elem.checked = value
-//         config[elem.id] = value
-//       });
-
-//       config["image_download"] = false
-//       await invoke("write_config_from_string", {newConfig: JSON.stringify(config)})
-//       return
-//   }
-
-//   // disable options related to ID3, send back-end respective information
-//   if (id == "ID3"){
-//     document.querySelector("#ID3_options")
-//       .querySelectorAll("input")
-//       .forEach(elem => {
-//         elem.disabled = !value
-//         elem.checked = value
-//         let id_parsed = elem.id.replace("ID3_", "").toLowerCase()
-//         config.id3_options[id_parsed] = value
-//     });
-
-//     await invoke("write_config_from_string", {newConfig: JSON.stringify(config)})
-//     return
-//   }
-
-//   //any ID3 standalone option 
-//   if(id.startsWith("ID3_")){
-//     let id_parsed = id.replace("ID3_", "").toLowerCase()
-//     config.id3_options[id_parsed] = value
-//     await invoke("write_config_from_string", {newConfig: JSON.stringify(config)})
-//     return
-//   }
-
-//   //and outher standalone option
-//   config[id] = value
-//   await invoke("write_config_from_string", {newConfig: JSON.stringify(config)})
-// }
-
-
+//TODO: build out edit page
+  //some things that sould be on the edit page:
+  //image chager,
+  //gain control,
+  //manual ID3 editor
+  //audio clipper, 
+    //this should be delagated to another update as
+    //it seems daunting, also might require ffmpeg to be installed
+  //compressor? 
+  //audio converter, requires ffmpeg 
+  
+//TODO: custom args might be interesting for yt-dlp, incase you use a proxy or something

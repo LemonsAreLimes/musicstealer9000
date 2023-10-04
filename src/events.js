@@ -16,7 +16,7 @@ export default {
       
         switch (new_page) {
           case "tab_download": 
-            pages.download()
+            pages.default()
             return
           case "tab_edit":  
             pages.edit()
@@ -30,39 +30,43 @@ export default {
         }
     },
 
-    //CREDS
+    // SETTINGS
+    async test_and_set_creds(){
+      let client_id = document.getElementById("client_id").value
+      let client_secret = document.getElementById("client_secret").value
+      console.log("testing credentials")
 
-    async test_credentials(){
-        console.log("test_credentials")
+      try { 
+        await invoke("get_token", {clientId: client_id, clientSecret: client_secret})
+        
+        //cheap way of telling the user it worked
+        document.getElementById("client_id").style = "outline: 1px solid green;"
+        document.getElementById("client_secret").style = "outline: 1px solid green;"
 
-        //get the credentials from the input feilds
-        let client_id = document.querySelector("#client_id").value
-        let client_secret = document.querySelector("#client_secret").value
-      
-        //test it
-        try{
-          console.log("test_client_credentials")
-      
-          await invoke("set_credentials", {clientId: client_id, clientSecret: client_secret})
-          let token = await invoke("get_token")
-          console.log(token)
-      
-          document.querySelector("body").dataset.token = token
-          open_main_page()
-        } catch { 
-          //if the credentials are invalid 
-          document.querySelector("#client_id").style = "outline: 1px solid red;"
-          document.querySelector("#client_secret").style = "outline: 1px solid red;"
-        }
+      } catch {
+
+        //if out function call to the backend does not work
+        //tell the user it did not work
+        document.getElementById("client_id").style = "outline: 1px solid red;"
+        document.getElementById("client_secret").style = "outline: 1px solid red;"
+
+      }
+
     },
 
     //DOWNLOAD
 
     async add_playlist() {
-        let token = document.querySelector("body").dataset.token
-        let playlist_id = document.querySelector("#playlist_link").value
-        if ( playlist_id == "" || playlist_id == " " ) { return }
-        await invoke("set_playlist", {playlistId: playlist_id, token: token});
+      let playlist_url = document.querySelector("#playlist_link").value
+      let playlist_id = await invoke("playlist_url_to_id", {url: playlist_url})
+      if (!playlist_id){
+        console.log("invalid playlist url, could not be parsed")
+        return
+      }
+
+      let config = await invoke("get_config")
+      let token = await invoke("get_token", {clientId: config["client_id"], clientSecret: config["client_secret"]})
+      await invoke("set_playlist", {playlistId: playlist_id, token: token})
     },
 
     show_playlist_options(e){
@@ -124,7 +128,8 @@ export default {
             console.log("standby")
             
             //make sure the link is correct
-            let token = document.querySelector("body").dataset.token
+            let token = await invoke("get_token")
+            console.log("TOKEN: " + token)
             let url = document.querySelector("#playlist_link").value
             if(url=="" || url==" "){ return false; }
 
@@ -213,6 +218,24 @@ export default {
         await invoke("write_config_from_string", {newConfig: JSON.stringify(config)})
     },
 
+    async do_thing(e){
+      console.log(e)
+      let config = await invoke("get_config")
+
+      if (e.srcElement.id == "download_src"){
+        config["download_source"] = e.srcElement.value
+      }
+
+      else if (e.srcElement.id == "audio_format") {
+        config["audio_format"] = e.srcElement.value
+      }
+
+      else {
+        console.log("unknown element selected!")
+      }
+
+      await invoke("write_config_from_string", {newConfig: JSON.stringify(config)})
+    }
 
 }
 

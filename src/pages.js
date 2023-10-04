@@ -1,4 +1,5 @@
 const { invoke } = window.__TAURI__.tauri;
+
 import events from './events.js'
 
 async function build_playlist_container(){
@@ -26,29 +27,7 @@ async function build_playlist_container(){
 
 export default {
 
-    async credential(){
-
-        let page_html = `
-        <video src="assets/a.mp4" type="video/mp4" autoplay muted loop id="lol"></video> 
-        <div class="container">
-          <h1>Welcome to music stealer 9000!</h1>
-          <p>no client credientals could be found!</p>
-          <p>please visit developer.spotify.com/dashboard to generate your client credentials</p>
-          <div class="credsPage">
-            <div>
-              <input id="client_id" placeholder="client id" />
-              <input id="client_secret" type="password" placeholder="client secret" />
-              <button id="creds_button" type="button">Lets go!</button>
-            </div>
-          </div>
-        </div>`
-
-        document.querySelector("body").innerHTML = page_html
-        document.querySelector("#creds_button").addEventListener("click", events.test_credentials)
-
-    },
-
-    async download(){
+    async default(){
 
         //get playlists
         let playlists_html = await build_playlist_container() 
@@ -103,7 +82,7 @@ export default {
                     events.playlist_click(playlists[i].getAttribute("id"))
                 })
             } catch {
-            console.log("not an element")
+              console.log("not an element")
             }
         }
     },
@@ -116,8 +95,6 @@ export default {
         
         //get config, only used for thread count
         let config = await invoke("get_config")
-        let current_thread_count = config.thread_count
-
         console.log(config)
 
         //cringe stupid dumb way to do this
@@ -139,7 +116,6 @@ export default {
         if (config.id3_options.artist && config.id3_options.year && config.id3_options.album && config.id3_options.track_number && config.id3_options.genre){
             ID3="checked"
         }
-
 
         let settings_html = `
         <div class="body_container">
@@ -178,21 +154,67 @@ export default {
                 <label for="ID3_GENRE"> Genre</label><br>
                 </div>
 
-                <input type="number" id="thread_count" value="${current_thread_count}" min="1" max="100">
+                <input type="number" id="thread_count" value="${config.thread_count}" min="1" max="100">
                 <label for="thread_count"> Thread count</label><br>
-            </form>
+
+                <select id="audio_format">
+                  <option value="mp3">MP3</option>
+                  <option value="flac">FLAC</option>
+                  <option value="ogg">OGG</option>
+                  <option value="wav">WAV</option>
+                  <option value="m4a">M4A</option>
+                </select>
+                <label for="audio_format">Format (NON FUNCTIONAL)</label><br>
+
+                <select id="download_src">
+                  <option value="ytsearch">Youtube</option>
+                  <option value="scsearch">Soundcloud</option>
+                </select>
+                <label for="download_src">Download source</label><br>
+              </form>
+            <div style="display:flex; flex-direction: column; width: 50vw; gap: 10px; margin-top: 10px;">
+              <input id="client_id" placeholder="client id" />
+              <input id="client_secret" type="password" placeholder="client secret" />
+              <button id="creds_button" type="button">Test and set</button>
+            </div>
         </div>`
 
         document.querySelector('body').innerHTML = settings_html
 
-        document.querySelectorAll("input").forEach(input_elem => {
-            input_elem.addEventListener("click", events.change_config_value)
+        //events for download dir (i plan to add this)
+        // document.getElementById("download_dir").addEventListener("change", (e)=>{
+        //   console.log(e)
+        // })
+
+        //set the current value of the select boxes
+        document.getElementById("audio_format").value = config.audio_format
+        document.getElementById("download_src").value = config.download_source
+        console.log(config.download_source)
+
+        //select menu events
+        document.querySelectorAll("select").forEach(elem => {
+          elem.addEventListener("change", events.do_thing)
         })
+
+        //generic input events
+        document.querySelectorAll("input").forEach(input_elem => {
+
+          //creds button is input but should not be caught in this
+          //it would be faster but just did not work.
+          if (input_elem.type == "checkbox" || input_elem.type == "number"){
+            input_elem.addEventListener("click", events.change_config_value)
+          }
+            
+        })
+
+        //creds button event
+        document.querySelector("#creds_button").addEventListener("click", await events.test_and_set_creds)
+        
+        //tab swticher
         let tabs = document.querySelector(".tab_switcher").children
         for (let i = 0; i < tabs.length; i++){
             tabs[i].addEventListener("click", events.switch_page)
         }
-
 
     }
 }
