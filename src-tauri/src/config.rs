@@ -1,40 +1,17 @@
 use std::{
     fs, 
     fs::File,
-    io::{ Write, Cursor },
+    io::Write,
     process::Command,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{self};
-use reqwest;    //for downloading ytdlp
+use dirs;
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Playlist {
-    pub name: String,
-    pub id: String,
-    pub download_dir: String,
-    pub image_url: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Id3Options { 
-    pub artist: bool,
-    pub year: bool,
-    pub album: bool,
-    pub track_number: bool,
-    pub genre: bool
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Config {
-    pub client_id: String,
-    pub client_secret: String,
-    pub thread_count: u32,
-    pub playlists: Vec<Playlist>,
-    pub image_download: bool,
-    pub image_delete: bool,
-    pub id3_options: Id3Options
-}
+use super::static_types::{
+    Config,
+    Id3Options,
+    Playlist
+};
 
 fn check_for_config() -> bool {
     if let Ok(current_dir) = std::env::current_dir() {
@@ -53,6 +30,27 @@ fn create_config(){
     let file_path = std::env::current_dir().expect("err").join("config.json");
     let mut file = File::create(&file_path).expect("could not create config file");
     
+    //get desktop, witch is used as the default download dir "/music/PLAYLISTNAME"
+    let mut default_dir;
+    if let Some(dir) = dirs::desktop_dir(){ 
+        default_dir = dir
+    }
+    else if let Some(dir) = dirs::home_dir(){ 
+        default_dir = dir
+    } else {
+
+        //fallback incase the desktop and home could not be found 
+        default_dir = std::env::current_dir()
+            .expect("could not get local dir")
+    }
+
+    default_dir.push("music");
+
+    //check if download dir exists, create it if not
+    if !default_dir.exists(){
+        let _ = fs::create_dir_all(&default_dir);
+    }
+
     let default_config = serde_json::to_string(&Config {
         client_id: "".to_string(),
         client_secret: "".to_string(),
@@ -60,6 +58,9 @@ fn create_config(){
         playlists: Vec::new(),
         image_delete: true,
         image_download: true,
+        download_dir: default_dir,
+        download_source: "ytsearch".to_string(),
+        audio_format: "mp3".to_string(),
         id3_options: Id3Options {
             artist: true,
             year: true,
@@ -75,6 +76,9 @@ fn create_config(){
 #[tauri::command]
 pub fn get_config() -> Result<Config, String> {
     check_for_config();
+
+    //config should exist beyond this point.
+
     if let Ok(current_dir) = std::env::current_dir() {
 
         //get the config file
@@ -85,8 +89,9 @@ pub fn get_config() -> Result<Config, String> {
         let config: Config = serde_json::from_str(&content).map_err(|err| format!("Error parsing JSON: {}", err))?;
         println!("{:?}", config);
         Ok(config)
+
     } else { 
-        Err("could not find config file".to_string())
+        Err("could not get config".to_string())
     }
 }
 
@@ -110,44 +115,6 @@ fn write_config(new_config: Config){
         
     }
 }
-
-
-#[tauri::command]
-pub fn get_thread_count() -> String {
-    match get_config() {
-        Ok(config) => config.thread_count.to_string(),
-        Err(_) => "UNDEFINED".to_string(),
-    }
-}
-
-#[allow(non_snake_case)]
-#[tauri::command]
-pub fn set_thread_count(threadCount: u32){
-    println!("{}", threadCount);
-    match get_config() {
-        Ok(mut config) => {
-            config.thread_count = threadCount;
-            write_config(config)
-        },
-        Err(_) => { println!("err"); return } 
-    };
-}
-
-
-#[allow(non_snake_case)]
-#[tauri::command]
-pub fn set_credentials( clientId: &str, clientSecret: &str){
-    match get_config() { 
-        Ok(mut config) => {
-            config.client_id = clientId.to_string();
-            config.client_secret = clientSecret.to_string();
-            write_config(config);
-        }
-        Err(_) => { return }
-    }
-}
-
-
 
 #[allow(non_snake_case)]
 #[tauri::command]
@@ -208,16 +175,7 @@ pub fn remove_playlist(playlistId: String){
 } 
 
 
-#[tauri::command]
-pub async fn download_ytdlp(){
-    let url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-    let response = reqwest::get(url).await.expect("couldn't get download url");
-    let mut file = std::fs::File::create("yt-dlp.exe").expect("could not create yt-dlp file");
-    let mut content =  Cursor::new(response.bytes().await.expect("couldn't write to yt-dlp"));
-    println!("{:?}", content);
-    let _ = std::io::copy(&mut content, &mut file);
-}
-
+//TODO: expand this to include more install types, linux and outhers
 #[tauri::command]
 pub fn ytdlp_check() -> Result<String, ()> {
 

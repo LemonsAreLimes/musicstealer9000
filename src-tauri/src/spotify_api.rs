@@ -1,225 +1,38 @@
 use std::{
-    process::Command,
-    path::{Path, PathBuf},
+    path::PathBuf,
     fs,
-    sync::{ Arc, Mutex },
+    sync::{ Arc, Mutex }
 };
-use serde::{Deserialize, Serialize};
+
 use serde_json;
 use reqwest;
 use reqwest::header::{ ACCEPT, AUTHORIZATION, CONTENT_TYPE };
 use json::JsonValue;
 use rand::Rng;
-use image;
-use id3::{ Tag, TagLike, Version };
-use id3_image::embed_image;
-use dirs;
 use tauri::State;
+use super::downloader::download_process;
 
-#[derive(Debug, Deserialize)]
-struct AcsessTokenResponse {
-    access_token: String,
-}
-
-#[derive(Clone, serde::Serialize, Debug)]
-struct GenericUpdate { 
-    id: i32,
-    text: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Song { 
-    video_id: i32,
-    name: String,
-    image_url: Option<String>,
-    track_number: Option<u32>,
-    artist: String,
-    album: Option<String>,
-    album_artist: Option<String>,
-    year: Option<i32>,
-    genre: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct RunOptions { 
-    image_download: bool,
-    image_delete: bool,
-    id3_artist: bool,
-    id3_year: bool,
-    id3_album: bool,
-    id3_track_number: bool,
-    id3_genre: bool
-} 
+//TODO: maybe create a file just for these structs, outhers 
+//for structs with an impl. may reduce memory usage? also performance
+//as it will not haft to convert all the data (Downloader::new())
+use super::static_types::{
+    RunOptions,
+    Song,
+    GenericUpdate,
+    AcsessTokenResponse,
+    Playlist
+};
 
 #[derive(Debug)]
 pub struct Downloader {
-    window: Option<tauri::Window>,
-    download_dir: String,
-    token: String,
-    playlist_id: String,
-    data: Vec<Song>,
-    thread_count: u32,
-    threads: Option<Vec<tokio::task::JoinHandle<()>>>,
-    yt_dlp_install_type: String,
-    options: RunOptions,
+    pub window: Option<tauri::Window>,
+    pub token: String,
+    pub playlist: Playlist,
+    pub data: Vec<Song>,
+    pub thread_count: u32,
+    pub threads: Option<Vec<tokio::task::JoinHandle<()>>>,
+    pub options: RunOptions,
 } 
-
-async fn edit_id3(track: &Song, track_path: &PathBuf){
-    
-    //set the tags
-    let mut tag = Tag::new();
-    tag.set_title(&track.name);
-
-    if let Some(album) = &track.album {
-        tag.set_album(album);
-    }
-    if let Some(album_artist) = &track.album_artist {
-        tag.set_artist(&track.artist);
-        tag.set_album_artist(album_artist);
-    }
-    if let Some(year) = track.year {
-        tag.set_year(year);
-    }
-    if let Some(track_number) = track.track_number {
-        tag.set_track(track_number);
-    }
-    if let Some(genre) = &track.genre {
-        tag.set_genre(genre);
-    }
-
-    tag.write_to_path(track_path, Version::Id3v24).expect("failed to write id3");
-
-}
-async fn download_audio(song: &Song, dir: &str, install_type: &str) -> bool{
-
-    let mut yt_dlp_location = "yt-dlp".to_string();
-    if install_type == "local" {
-        //get our current dir
-        let curr_dir = std::env::current_dir()
-            .expect("could not get current directory")
-            .to_owned().to_string_lossy().to_string();
-        
-        yt_dlp_location = format!("{}\\yt-dlp.exe", curr_dir);
-    }
-
-    //parse out yt-dlp arguments
-    let search_arg = format!("ytsearch:'{}'", song.name.to_string() + " " + &song.artist);
-    let dir_arg = format!("-P {}", dir);
-    let name_arg = format!("-o{}", &song.video_id);
-
-    //run yt-dlp
-    println!("{:?}", yt_dlp_location);
-    let mut cmd = Command::new(yt_dlp_location);
-    let x = cmd.arg(search_arg)
-        .arg("--extract-audio")
-        .arg("--audio-format")
-        .arg("mp3")
-        .arg(dir_arg)
-        .arg(name_arg)
-        .status();
-    // cmd.creation_flags(0x08000000);
-
-    match x { 
-        Ok(_) => return true,
-        Err(e) => {println!("{:?}", e); return false}
-    }
-
-}
-async fn get_image(image_url: &String, download_path: &Path){
-    let bytes = reqwest::get(image_url)
-        .await
-        .expect("could not download image")
-        .bytes()
-        .await
-        .expect("could not parse image to bytes");
-    let img = image::load_from_memory(&bytes).expect("could not load image");
-    img.save(download_path).expect("could not save image"); 
-}
-
-async fn download_process(window: tauri::Window, songs: Arc<Arc<Vec<Song>>>, dir: String, install_type: String, download_image: bool, option_delete_image: bool) -> Result<(), String> {
-
-    for song in songs.to_vec(){
-
-        window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "Starting".to_string()})
-            .expect("could not send status update (START)");
-
-        let formatted_track_path = format!("{}/{}.mp3", dir, song.video_id);
-        let track_path = Path::new(&formatted_track_path).to_owned();
-
-        let image_formatted_path = format!("{}/{}.jpg", dir, song.video_id);
-        let image_path = Path::new(&image_formatted_path).to_owned();
-
-        println!("{:?}", &image_path);
-        println!("{:?}", &track_path);
-
-        if download_image && &song.image_url != &None { 
-            println!("IMG PATH: {:?}", &image_path);
-            get_image(                                          // this function will only ever run if we have an image and want to download it 
-                &song.image_url.clone().unwrap(),
-                &image_path
-            ).await; 
-        }
-
-        window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "Downloading".to_string()})
-            .expect("could not send status update (IMAGE)");
-
-        // audio download, this can never be turned off
-        let download_succsess = download_audio(&song, &dir, &install_type).await;
-
-        if !download_succsess { 
-            window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "THREAD CRASHED!!!".to_string()})
-                .expect("could not send status update (AUDIO DOWNLOAD)");
-            println!("THREAD CRASHED!!! ALL SONGS DELIGATED TO THIS THREAD WILL NOT BE DOWNLOADED!");
-            continue;
-        }
-
-        window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "Finishing up".to_string()})
-            .expect("could not send status update (ID3 EDIT)");
-
-
-        edit_id3(&song, &track_path).await;
-
-        // logic regarding id3 image
-        if &song.image_url != &None && download_image { 
-            
-            //embeds the image
-            embed_image(&track_path, &image_path)
-                .expect("could not set image");
-
-            if option_delete_image {        //delete the image if requested
-                fs::remove_file(image_path)
-                    .expect("could not remove old image file!");
-                println!("remove old image file");
-            } 
-            else {                          //rename the image to the same as the audio 
-                let mut renamed_image_path = image_path.clone();
-                renamed_image_path.set_file_name(&song.name);
-                renamed_image_path.set_extension("jpg");
-
-                fs::rename(image_path, &renamed_image_path)
-                    .expect("could not rename the image file!");
-            }
-        }
-        
-        //finally, rename the audio file to the appropreate thing
-        let mut renamed_audio_path = track_path.clone();
-        renamed_audio_path.set_file_name(&song.name);
-        renamed_audio_path.set_extension("mp3");
-
-        fs::rename(track_path, renamed_audio_path)
-            .expect("could not rename the audio file!");
-
-        window.emit("statusUpdate", GenericUpdate {id: song.video_id, text: "done!".to_string()})
-            .expect("could not send status update (DONE)");
-
-    }
-    window.emit("threadDone", "")
-        .expect("could not send status update (thread finished)");
-
-    println!("THREAD DONE");
-    Ok(())
-
-}
 
 impl Downloader {
     async fn get_genre(&mut self, track: &JsonValue) -> Option<String>{
@@ -308,9 +121,12 @@ impl Downloader {
             temp_song_data.image_url = Some(track["album"]["images"][0]["url"].as_str().unwrap().to_string())
         }
 
-        if self.options.id3_track_number {
+        if self.options.id3_track_number {  //TODO: fix this in the event that its not found
+                                            //would result in the number being Some(None) 
+                                            //this also goes for all the outher ones here
             temp_song_data.track_number = Some(track["track_number"].as_u32().unwrap())
         }
+
 
         if self.options.id3_genre {
             temp_song_data.genre = Some(self.get_genre(track).await.unwrap())
@@ -326,7 +142,7 @@ impl Downloader {
 
         //get the batch data
         let client = reqwest::Client::new();
-        let response = client.get(format!("https://api.spotify.com/v1/playlists/{}/tracks?limit=100&offset={}", self.playlist_id, offset))
+        let response = client.get(format!("https://api.spotify.com/v1/playlists/{}/tracks?limit=100&offset={}", self.playlist.id, offset))
             .header(AUTHORIZATION, format!("Bearer {}", self.token)) 
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json")
@@ -365,25 +181,36 @@ impl Downloader {
         
     }
 
-    fn get_filenames(&self) -> Vec<String>{
+    fn get_filenames(&self) -> Option<Vec<String>>{
         let mut file_names = Vec::new(); 
+        match fs::read_dir(&self.options.download_dir) {
+            Ok(entries) => { 
 
-        for entry in fs::read_dir(&self.download_dir).expect("failed to read") {
-            let entry = entry.expect("err reading entry");
-            let os_string = entry.file_name();
-            let filename = os_string.to_str().unwrap();
-            let parsed_filename = str::replace(filename, ".mp3", "").to_string();
-
-            println!("FOUND SONG ALREADY DOWNLOADED: {:?}", &parsed_filename);
-            file_names.push(parsed_filename);
+                for entry in entries {
+                    let entry = entry.expect("err reading entry");
+                    let os_string = entry.file_name();
+                    let filename = os_string.to_str().unwrap();
+                    let parsed_filename = str::replace(filename, ".mp3", "").to_string();
+        
+                    println!("FOUND SONG ALREADY DOWNLOADED: {:?}", &parsed_filename);
+                    file_names.push(parsed_filename);
+                };
+                
+                return Some(file_names)
+            },
+            Err(_) => {
+                println!("no dir found");
+                let parsed_path = self.options.download_dir.join(&self.playlist.name);
+                let _ = fs::create_dir_all(parsed_path);
+                return None
+            }
         }
 
-        file_names
 
     }
     async fn get_playlist_length(&self) -> Result<usize, String>{
         let client = reqwest::Client::new();
-        let response = client.get(format!("https://api.spotify.com/v1/playlists/{}/", self.playlist_id))
+        let response = client.get(format!("https://api.spotify.com/v1/playlists/{}/", self.playlist.id))
             .header(AUTHORIZATION, format!("Bearer {}", self.token)) 
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json")
@@ -426,14 +253,19 @@ impl Downloader {
 
                     //check if we already have the song downloaded
                     for song in song_batch {
-                        if already_downloaded_songs.contains(&song.name){
-                            println!("soung already downloaded");
-                            self.window.as_ref().expect("no window found").emit("statusUpdate", GenericUpdate {id: song.video_id, text: "done!".to_string()})
-                                .expect("could not send status update (DONE)");
-                        } else { 
-                            songs_collected.push(song);
-                            println!("soung NOT already downloaded")
+                        if let Some(songs) = &already_downloaded_songs {
+                            if songs.contains(&song.name) {
+                                println!("soung already downloaded");
+                                self.window.as_ref().expect("no window found").emit("statusUpdate", GenericUpdate {id: song.video_id, text: "done!".to_string()})
+                                    .expect("could not send status update (DONE)");
+                                
+                                continue;
+                            }
                         }
+                        
+                        songs_collected.push(song);
+                        println!("soung NOT already downloaded")
+                        
                     }
 
                     offset += 100
@@ -455,6 +287,19 @@ impl Downloader {
         self.window.as_ref().expect("no window available")
             .emit("disableStop", "")
             .expect("could not emit event");
+
+        //check if the download dir exists (it hast to)
+        // match fs::read_dir(&self.options.download_dir){
+        //     Ok(_)=>{
+        //         println!("download dir was found!")
+        //     },
+        //     Err(_)=>{
+        //         //the dir was not found, create it.
+
+
+
+        //     }
+        // }
 
         //get all the tracks in the playlist
         let songs = self.get_playlist_items().await.expect("get_playlist_items failed");
@@ -482,9 +327,7 @@ impl Downloader {
 
         //mutexify relavant variables
         let window_mutx = Arc::new(Mutex::new(&self.window));
-        let dir_mutx = Arc::new(Mutex::new(&self.download_dir));
         let items_mutx = Arc::new(Mutex::new(&self.data));
-        let install_type_mutx = Arc::new(Mutex::new(&self.yt_dlp_install_type));
         let options_mutx = Arc::new(Mutex::new(&self.options));
 
         let chunks: Vec<_> = items_mutx.lock().unwrap().chunks(chunk_size)
@@ -493,13 +336,9 @@ impl Downloader {
 
         println!("DOWNLOAD STARTING");
         for chunk in chunks {
-            let install_type_clone = install_type_mutx.lock().unwrap().clone();
 
             let chunk_mutx = Arc::new(chunk);
             let chunk_clone = chunk_mutx.clone();
-            
-            let dir_clone = dir_mutx.clone();
-            let dir_useable = dir_clone.lock().unwrap().clone();
 
             let window_clone = window_mutx.clone();
             let window_useable = match window_clone.lock().unwrap().clone() {
@@ -509,16 +348,10 @@ impl Downloader {
 
             let options_clone = options_mutx.lock().unwrap().clone();
             
+            
             let handle = tokio::spawn(async move {
                 println!("{:?}", options_clone);
-                download_process(
-                    window_useable, 
-                    chunk_clone, 
-                    dir_useable, 
-                    install_type_clone, 
-                    options_clone.image_download,
-                    options_clone.image_delete
-                )
+                download_process(window_useable, chunk_clone, options_clone)
                     .await
                     .expect("download process failed");
             });
@@ -547,8 +380,7 @@ impl Downloader {
                     .emit("downloadFinish", "")
                     .expect("no");
 
-                self.download_dir = "".to_string();
-                self.playlist_id = "".to_string();
+                self.playlist.id = "".to_string();
                 self.token = "".to_string(); 
             }
             None => {
@@ -557,20 +389,11 @@ impl Downloader {
         } 
     }
 
-    pub fn set_window(&mut self, window: tauri::Window){
-        self.window = Some(window);
-    }
-    pub fn set_token(&mut self, token: String){
-        self.token = token
-    }
-    pub fn set_url(&mut self, url: String){
-        self.playlist_id = url.replace("https://open.spotify.com/playlist/", "")
-    }
-    pub async fn set_download_dir(&mut self) -> Result<(), String>{
+    pub async fn set_download_dir(&mut self) -> Result<(), ()>{
         
         //get the playlist name
         let client = reqwest::Client::new();
-        let response = client.get(format!("https://api.spotify.com/v1/playlists/{}/", self.playlist_id))
+        let response = client.get(format!("https://api.spotify.com/v1/playlists/{}/", self.playlist.id))
             .header(AUTHORIZATION, format!("Bearer {}", self.token)) 
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json")
@@ -579,7 +402,7 @@ impl Downloader {
         //make sure the request went through
         if response.status() != 200 { 
             println!("could not get playlist name, response code: {:?}", response.status());
-            return Err("could not get playlist name".to_string())
+            return Err(())
         }
             
         //parse the response, get the name
@@ -587,32 +410,44 @@ impl Downloader {
         let json_res = json::parse(&res).expect("playlist data json could not be parsed");
         let playlist_name = &json_res["name"].to_string();
 
-        //create the download dir
-        let mut download_dir = dirs::desktop_dir().expect("COULD NOT FIND USERS DESKTOP");
-        download_dir.push("music");
-        download_dir.push(playlist_name);
-
-        //check if the new download dir exists, create it if not
-        if !download_dir.exists(){
-            let _ = fs::create_dir_all(&download_dir);
-        }
-
-        self.download_dir = download_dir.to_owned().to_string_lossy().to_string();
-
-        return Ok(())
+        //get the download dir from the config
+        match super::config::get_config() { 
+            Ok(conf) => {
+                let dir = conf.download_dir.join(playlist_name.to_string());
+                self.options.download_dir = dir;
+                return Ok(())
+            },
+            Err(_) => {return Err(())},
+        };
 
     }
-    pub fn set_install_type(&mut self){
-        let install_type = super::config::ytdlp_check().expect("not installed");
-        self.yt_dlp_install_type = install_type;
+    pub async fn set_playlist(&mut self){
+        let playlist_id = &self.playlist.id;
+
+        let raw_playlist = get_playlist_data(playlist_id.to_string(), &self.token).await.expect("playlist no");
+        let playlist_parsed = Playlist {
+            name: raw_playlist["name"].to_string(),
+            id: playlist_id.to_string(),
+            image_url: raw_playlist["images"][0]["url"].to_string(),
+            download_dir: "Default".to_string()
+        };
+        self.playlist = playlist_parsed
     }
 
     pub fn new() -> Self {
 
+        //this function needs to by sync.
+        //only operations that initalize and are sync are ran here
+        let install_type = super::config::ytdlp_check().expect("not installed");
+
         let config = super::config::get_config().unwrap();
         let op = RunOptions { 
+            ytdlp_search_type: config.download_source,
+            yt_dlp_install_type: install_type,
+            download_dir: PathBuf::new(),
             image_download: config.image_download,
             image_delete: config.image_delete,
+            edit_id3: false,
             id3_artist: config.id3_options.artist,
             id3_year: config.id3_options.year,
             id3_album: config.id3_options.album,
@@ -622,13 +457,11 @@ impl Downloader {
 
         return Downloader {
             window: None,
-            download_dir: "".to_string(),
             token: "".to_string(),
-            playlist_id: "".to_string(),
+            playlist: Playlist { name: "".to_string(), id: "".to_string(), download_dir: "".to_string(), image_url: "".to_string() },
             data: Vec::new(),
             thread_count: config.thread_count,
             threads: None,
-            yt_dlp_install_type: "".to_string(),
             options: op
         };
     }
@@ -663,17 +496,18 @@ pub async fn start_download(handler: State<'_, tokio::sync::Mutex<Downloader>>, 
 
     //these vars dont need to change
     if useable_hander.window == None { 
-        useable_hander.set_window(window);
+        useable_hander.window = Some(window);
     }
 
-    if useable_hander.yt_dlp_install_type == "" {
-        useable_hander.set_install_type();
-    }
-
+    let parsed_id = playlist_url_to_id(url).expect("invalid url");
+    println!("{:?}", parsed_id);
+    
     //these do though
-    useable_hander.set_token(token.to_string());
-    useable_hander.set_url(url.to_string());
+    useable_hander.token = token.to_string();
+    useable_hander.playlist.id = parsed_id.to_string();
+
     useable_hander.set_download_dir().await.expect("COULD NOT CREATE OR FIND DOWNLOAD DIRECTORY");
+    useable_hander.set_playlist().await;
 
     //start the download
     let _ = useable_hander.start_handler().await;
@@ -713,28 +547,48 @@ pub async fn check_link(url: &str, token: &str) -> Result<bool, String>{
 }
 
 #[tauri::command]
-pub async fn get_token() -> Result<String, String>{
-    match super::config::get_config() {
-        Ok(config) => {
+pub async fn get_token(client_id: Option<String>, client_secret: Option<String>) -> Result<String, ()>{ 
 
-            let client = reqwest::Client::new();
-            let response = client.post("https://accounts.spotify.com/api/token")
-                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(format!("grant_type=client_credentials&client_id={}&client_secret={}", config.client_id, config.client_secret))
-                .send().await.unwrap();
-        
-            //make sure it was successful
-            if response.status() != 200 {
-                println!("invaliad credentals, response code {:?}", response.status()); 
-                return Err("credientals invalid!".to_string());
-            }
-            
-            //parse to json, extract and return token 
-            let res =  response.text().await.expect("could not parse response");
-            let json_res: AcsessTokenResponse = serde_json::from_str(&res).map_err(|err| format!("Error parsing JSON: {}", err))?;
-            return Ok(json_res.access_token)
+    let client_id_cpy: String;
+    let client_secret_cpy: String;
 
-        },
-        Err(_) => return Err("could not get config".to_string())
-    };
+    //use whatevers in the config if we are testing 
+    if client_id == None || client_secret == None { 
+        let config = super::config::get_config().unwrap();
+        client_id_cpy = config.client_id;
+        client_secret_cpy = config.client_secret;
+    } else {
+        client_id_cpy = client_id.unwrap();
+        client_secret_cpy = client_secret.unwrap();
+    }
+
+    let client = reqwest::Client::new();
+    let response = client.post("https://accounts.spotify.com/api/token")
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(format!("grant_type=client_credentials&client_id={}&client_secret={}", client_id_cpy, client_secret_cpy))
+        .send().await.unwrap();
+
+    //make sure it was successful
+    if response.status() != 200 {
+        println!("invaliad credentals, response code {:?}", response.status()); 
+        return Err(());
+    }
+    
+    //parse to json, extract and return token 
+    let res =  response.text().await.expect("could not parse response");
+    let json_res: AcsessTokenResponse = serde_json::from_str(&res).map_err(|err| format!("Error parsing JSON: {}", err)).unwrap();
+    return Ok(json_res.access_token)
+}
+
+#[allow(non_snake_case)]
+#[tauri::command]
+pub fn playlist_url_to_id(url: String) -> Result<String, ()>{
+    let mut playlist_id = url.replace("https://open.spotify.com/playlist/", "");
+
+    if playlist_id.contains("?si=") {
+        playlist_id.replace_range(22..playlist_id.len(), "");
+    }
+
+    if playlist_id.len() != 22 {return Err(());}
+    Ok(playlist_id.to_string())
 }
